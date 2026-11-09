@@ -2,6 +2,12 @@
 
 Visualization of NYC autumn leaf colors and shapes, built from the 2015 NYC Street Tree Census.
 
+## Todo:
+
+- fix the street name lookup (currently a json datalist fed into a input box) which is not nuanced enough to catch things like "east" meaning "e", etc
+- update readme to remove features that are no longer included
+- figure out if this should be hosted in a new repo, or pull request the old one (but then the old one would be lost!)
+
 - **Street view:** type in a street to see which leaves you'd find on the ground there.
 - **City map:** a zoomable, top-down map of NYC. Each of the ~650,000 living street trees is drawn at its real location as its species' leaf, in its fall color, on a light background with faint street centerlines. You can highlight individual boroughs, or pick a street to zoom to it and highlight its trees.
 
