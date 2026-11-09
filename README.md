@@ -13,7 +13,7 @@ Each tree species in the census is matched to a leaf shape (`shapes.json`) and a
 2. Tree positions are stored as compact binary files (`data/trees_{borough}.bin`), about 12 bytes per tree. Positions use NY State Plane coordinates (in feet), which are flat and accurate for NYC, so no map projection or tile library is needed.
 3. Street centerlines come from the NYC Open Data Centerline (CSCL) dataset. They're reprojected, simplified, and saved as `data/streets_{borough}.bin`. Borough outlines are saved as a small GeoJSON.
 4. `data/manifest.json` holds the shape, color, and street name lookups, plus bounding boxes used to zoom to a borough or street.
-5. In the browser, street lines are drawn on a 2D `<canvas>`, and the leaves are drawn on a second canvas with WebGL (`leaf-gl.js`). The tree data is sent to the graphics card once, so all ~650,000 leaves redraw in a single batch as you pan and zoom with d3-zoom. When zoomed out, trees are colored dots that gradually turn into rotated leaf shapes as you zoom in. Browsers without WebGL2 fall back to dots at every zoom. All map colors and sizes are set in one `MAP_STYLE` object.
+5. In the browser, street lines are drawn on a 2D `<canvas>`, and the leaves are drawn on a second canvas with WebGL (`leaf-gl.js`). The tree data is sent to the graphics card once, so all ~650,000 leaves redraw in a single batch as you pan and zoom with d3-zoom. Every tree is drawn as its rotated leaf shape at every zoom; when leaves are only a few pixels wide they are drawn fully opaque so the zoomed-out city stays saturated. Browsers without WebGL2 fall back to colored dots. All map colors and sizes are set in one `MAP_STYLE` object.
 
 ### Files
 

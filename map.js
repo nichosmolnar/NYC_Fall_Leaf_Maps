@@ -11,8 +11,9 @@ const MAP_STYLE = {
     dimmedLeafAlpha: 0.15,      // non-selected boroughs and streets
     dimmedStreetAlpha: 0.4,
     leafFeet: 55,               // leaf shape size on the ground, in feet
+    minLeafPx: 1.6,             // leaves never shrink below this on screen
     maxLeafPx: 90,
-    dotBlendPx: [1.5, 4]        // leaf sizes over which dots fade into leaf shapes
+    solidLeafPx: [2, 6]         // leaf sizes over which tiny leaves go from fully opaque to true shape
 };
 
 const LeafMap = (() => {
@@ -30,7 +31,7 @@ const LeafMap = (() => {
     let manifest = null;
     let streetIndex = new Map();
     let boroughs = [];
-    let dotFull, dotDim, dotRgb;
+    let dotFull, dotDim;
     let dotImage = null;
 
     let width = 0, height = 0, dpr = 1;
@@ -65,11 +66,11 @@ const LeafMap = (() => {
         manifest = m;
         manifest.streets.forEach((s, i) => streetIndex.set(s[0], i));
 
-        [dotFull, dotDim, dotRgb] = buildDotPalettes();
+        [dotFull, dotDim] = buildDotPalettes();
         boroughs = await Promise.all(manifest.boroughs.map(loadBorough));
 
         try {
-            renderer = createLeafRenderer(leafCanvas, { manifest, shapes, boroughs, dotColors: dotRgb, fillLeaf });
+            renderer = createLeafRenderer(leafCanvas, { manifest, shapes, boroughs, fillLeaf });
         } catch (error) {
             console.error('WebGL leaf renderer failed, falling back to dots:', error);
         }
@@ -152,20 +153,18 @@ const LeafMap = (() => {
         ctx.fill(leafPath);
     }
 
-    // Dots use the middle of each leaf's gradient: packed little-endian RGBA for the
-    // 2D fallback, and 0..1 RGB triples for the WebGL renderer
+    // 2D fallback dots use the middle of each leaf's gradient, as packed little-endian RGBA
     function buildDotPalettes() {
         const pack = (c, alpha) => ((Math.round(alpha * 255) << 24) | (c.b << 16) | (c.g << 8) | c.r) >>> 0;
         const full = new Uint32Array(manifest.colors.length);
         const dim = new Uint32Array(manifest.colors.length);
-        const rgb = manifest.colors.map((name, i) => {
+        manifest.colors.forEach((name, i) => {
             const colors = string_color[name] || ['#787878'];
             const mid = d3.rgb(colors.length > 1 ? d3.piecewise(d3.interpolateRgb, colors)(0.5) : colors[0]);
             full[i] = pack(mid, 1);
             dim[i] = pack(mid, MAP_STYLE.dimmedLeafAlpha);
-            return [mid.r / 255, mid.g / 255, mid.b / 255];
         });
-        return [full, dim, rgb];
+        return [full, dim];
     }
 
     // ---------- view ----------
@@ -184,9 +183,15 @@ const LeafMap = (() => {
 
         const [x0, y0, x1, y1] = manifest.bbox;
         fitK = 0.95 * Math.min(width / (x1 - x0), height / (y1 - y0));
+        // d3 recenters (ignoring the cursor) whenever the pan extent is smaller than the
+        // viewport, so the extent must cover the whole viewport even at the minimum zoom
+        const minK = fitK * 0.8;
         const pad = 20000;
-        zoom.scaleExtent([fitK * 0.8, MAX_ZOOM])
-            .translateExtent([[x0 - pad, y0 - pad], [x1 + pad, y1 + pad]]);
+        const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+        const halfW = Math.max((x1 - x0) / 2 + pad, width / minK / 2);
+        const halfH = Math.max((y1 - y0) / 2 + pad, height / minK / 2);
+        zoom.scaleExtent([minK, MAX_ZOOM])
+            .translateExtent([[cx - halfW, cy - halfH], [cx + halfW, cy + halfH]]);
     }
 
     // Keep the same point of the city in the middle of the map
@@ -281,15 +286,14 @@ const LeafMap = (() => {
         const leafPx = Math.min(MAP_STYLE.maxLeafPx, MAP_STYLE.leafFeet * transform.k);
         if (!renderer) return drawDots(leafPx);
 
-        const [lo, hi] = MAP_STYLE.dotBlendPx;
+        const [lo, hi] = MAP_STYLE.solidLeafPx;
         const t = Math.min(1, Math.max(0, (leafPx - lo) / (hi - lo)));
-        const blend = t * t * (3 - 2 * t);
         renderer.draw({
             k: transform.k * dpr,
             x: transform.x * dpr,
             y: transform.y * dpr,
-            size: dotDevicePx(leafPx) + (leafPx * dpr - dotDevicePx(leafPx)) * blend,
-            blend,
+            size: Math.max(MAP_STYLE.minLeafPx, leafPx) * dpr,
+            solid: 1 - t * t * (3 - 2 * t),
             dimAlpha: MAP_STYLE.dimmedLeafAlpha,
             ranges: highlightRanges()
         });

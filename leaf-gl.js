@@ -12,17 +12,18 @@ layout(location = 5) in float a_rotation; // 0..255 -> full turn
 uniform vec2 u_viewport;     // device px
 uniform vec3 u_transform;    // k, x, y in device px
 uniform float u_size;        // quad size in device px
-uniform float u_blend;       // 0 = dot, 1 = leaf
+uniform float u_solid;       // 0..1: how far tiny leaves are boosted toward full opacity
 uniform float u_nColors;
+uniform float u_maxLevel;    // 1x1 mip level of the leaf texture
 uniform int u_rangeStart;    // highlighted instances in this draw
 uniform int u_rangeEnd;
 uniform int u_pass;          // 0 = dimmed trees, 1 = highlighted trees
 uniform float u_dimAlpha;
-uniform vec3 u_dotColors[32];
+uniform mediump sampler2DArray u_leaves;
 
 out vec2 v_uv;
 flat out float v_layer;
-flat out vec3 v_dotColor;
+flat out float v_gain;
 flat out float v_alpha;
 
 void main() {
@@ -32,18 +33,18 @@ void main() {
         return;
     }
 
-    vec2 corner = a_corner * u_size;
-    if (u_blend > 0.0) {
-        float a = a_rotation * (6.2831853 / 256.0);
-        corner = mat2(cos(a), sin(a), -sin(a), cos(a)) * corner;
-    }
+    float a = a_rotation * (6.2831853 / 256.0);
+    vec2 corner = mat2(cos(a), sin(a), -sin(a), cos(a)) * (a_corner * u_size);
     vec2 screen = vec2(a_x, a_y) * u_transform.x + u_transform.yz + corner;
     gl_Position = vec4(screen / u_viewport * 2.0 - 1.0, 0.0, 1.0);
     gl_Position.y = -gl_Position.y;
 
     v_uv = a_corner + 0.5;
     v_layer = a_shape * u_nColors + a_color;
-    v_dotColor = u_dotColors[int(a_color)];
+    // A leaf only covers part of its square, so a few-pixel leaf averages out pale;
+    // dividing by its mean coverage keeps the zoomed-out city as saturated as solid dots.
+    float coverage = textureLod(u_leaves, vec3(0.5, 0.5, v_layer), u_maxLevel).a;
+    v_gain = mix(1.0, 1.0 / max(coverage, 0.05), u_solid);
     v_alpha = highlighted ? 1.0 : u_dimAlpha;
 }
 `;
@@ -53,29 +54,29 @@ precision highp float;
 precision mediump sampler2DArray;
 
 uniform sampler2DArray u_leaves;
-uniform float u_blend;
 
 in vec2 v_uv;
 flat in float v_layer;
-flat in vec3 v_dotColor;
+flat in float v_gain;
 flat in float v_alpha;
 out vec4 outColor;
 
 void main() {
     vec4 leaf = texture(u_leaves, vec3(v_uv, v_layer));  // premultiplied
-    vec4 color = mix(vec4(v_dotColor, 1.0), leaf, u_blend) * v_alpha;
+    leaf *= min(v_gain, 1.0 / max(leaf.a, 0.004));       // boost without exceeding opaque
+    vec4 color = leaf * v_alpha;
     if (color.a < 0.004) discard;
     outColor = color;
 }
 `;
 
 // Returns null when WebGL2 isn't available, so the caller can fall back to 2D dots.
-// options: { manifest, shapes, boroughs, dotColors: [[r,g,b] 0..1], fillLeaf, layerPx }
+// options: { manifest, shapes, boroughs, fillLeaf, layerPx }
 function createLeafRenderer(canvas, options) {
     const gl = canvas.getContext('webgl2', { antialias: false, premultipliedAlpha: true, alpha: true });
     if (!gl) return null;
 
-    const { manifest, shapes, boroughs, dotColors, fillLeaf } = options;
+    const { manifest, shapes, boroughs, fillLeaf } = options;
     const layerPx = options.layerPx || 128;
     const nShapes = manifest.shapes.length;
     const nColors = manifest.colors.length;
@@ -86,13 +87,13 @@ function createLeafRenderer(canvas, options) {
         viewport: uniform('u_viewport'),
         transform: uniform('u_transform'),
         size: uniform('u_size'),
-        blend: uniform('u_blend'),
+        solid: uniform('u_solid'),
         nColors: uniform('u_nColors'),
+        maxLevel: uniform('u_maxLevel'),
         rangeStart: uniform('u_rangeStart'),
         rangeEnd: uniform('u_rangeEnd'),
         pass: uniform('u_pass'),
         dimAlpha: uniform('u_dimAlpha'),
-        dotColors: uniform('u_dotColors'),
         leaves: uniform('u_leaves')
     };
 
@@ -165,7 +166,7 @@ function createLeafRenderer(canvas, options) {
     // ---- constant state ----
     gl.useProgram(program);
     gl.uniform1f(u.nColors, nColors);
-    gl.uniform3fv(u.dotColors, new Float32Array(dotColors.flat()));
+    gl.uniform1f(u.maxLevel, levels - 1);
     gl.uniform1i(u.leaves, 0);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -175,7 +176,7 @@ function createLeafRenderer(canvas, options) {
         gl.viewport(0, 0, canvas.width, canvas.height);
     }
 
-    // state: { k, x, y (device px), size (device px), blend (0..1), dimAlpha,
+    // state: { k, x, y (device px), size (device px), solid (0..1), dimAlpha,
     //          ranges: [[start, end], ...] highlighted instances per borough }
     function draw(state) {
         gl.viewport(0, 0, canvas.width, canvas.height);
@@ -186,7 +187,7 @@ function createLeafRenderer(canvas, options) {
         gl.uniform2f(u.viewport, canvas.width, canvas.height);
         gl.uniform3f(u.transform, state.k, state.x, state.y);
         gl.uniform1f(u.size, state.size);
-        gl.uniform1f(u.blend, state.blend);
+        gl.uniform1f(u.solid, state.solid);
         gl.uniform1f(u.dimAlpha, state.dimAlpha);
 
         // dimmed trees first, so highlighted leaves sit on top
