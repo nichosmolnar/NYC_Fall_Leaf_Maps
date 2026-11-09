@@ -7,7 +7,6 @@ const MAP_STYLE = {
     street: '#e2e2de',          // hairline centerlines, barely visible
     streetWidthPx: 0.5,         // scaled up gently with zoom
     boroughOutline: '#cfcfcb',
-    selectedStreet: '#9a9a94',  // selected street, still neutral gray
     dimmedLeafAlpha: 0.15,      // non-selected boroughs and streets
     dimmedStreetAlpha: 0.4,
     leafFeet: 55,               // leaf shape size on the ground, in feet
@@ -19,6 +18,9 @@ const MAP_STYLE = {
 const LeafMap = (() => {
     const MAX_ZOOM = 1.6;           // screen px per foot; keep leafFeet * MAX_ZOOM near maxLeafPx
     const STREET_MIN_SPAN_FT = 800; // zoom-to-street never gets closer than this
+    const HIGHLIGHT_MS = 350;       // leaf grow/shrink when a street is added or removed
+    const PAN_PAD_FT = 20000;       // how far past the city's edges the view can pan
+    const PAN_FREE_ZOOM = 1.5;      // multiple of the fit-city zoom where full panning is allowed
 
     const container = document.getElementById('map');
     const streetCanvas = document.getElementById('street-canvas');
@@ -35,20 +37,25 @@ const LeafMap = (() => {
     let dotImage = null;
 
     let width = 0, height = 0, dpr = 1;
-    let fitK = 1;
+    let fitK = 1, minK = 1;
     let transform = d3.zoomIdentity;
     let frame = null;
 
     const selectedBoroughs = new Set();  // empty = all boroughs active
-    let selectedStreet = -1;
-    let selectedStreetPath = null;
+    // street id -> { name, boroIdx, start, count, bbox, bytes, progress, target };
+    // removed streets stay here with target 0 until they finish shrinking
+    const selectedStreets = new Map();
+    let tweenFrame = null;
+    let lastTweenTime = 0;
 
-    const api = { onStreetCleared: null };
+    const api = { onStreetsChanged: null };
 
-    const zoom = d3.zoom().on('zoom', event => {
-        transform = event.transform;
-        scheduleDraw();
-    });
+    const zoom = d3.zoom()
+        .constrain(constrainPan)
+        .on('zoom', event => {
+            transform = event.transform;
+            scheduleDraw();
+        });
 
     api.ready = load().catch(error => {
         console.error('Error loading map data:', error);
@@ -183,15 +190,27 @@ const LeafMap = (() => {
 
         const [x0, y0, x1, y1] = manifest.bbox;
         fitK = 0.95 * Math.min(width / (x1 - x0), height / (y1 - y0));
-        // d3 recenters (ignoring the cursor) whenever the pan extent is smaller than the
-        // viewport, so the extent must cover the whole viewport even at the minimum zoom
-        const minK = fitK * 0.8;
-        const pad = 20000;
+        minK = fitK * 0.8;
+        zoom.scaleExtent([minK, MAX_ZOOM]);
+    }
+
+    // Panning room around the city grows with zoom: none at the minimum zoom (city centered),
+    // full PAN_PAD_FT beyond the city's edges from PAN_FREE_ZOOM * fitK in. Shrinking with
+    // the zoom level glides the city back to center while zooming out.
+    function constrainPan(t) {
+        if (!manifest) return t;
+        const [x0, y0, x1, y1] = manifest.bbox;
+        const r = Math.min(1, Math.max(0, (t.k - minK) / (PAN_FREE_ZOOM * fitK - minK)));
+        const s = r * r * (3 - 2 * r);
         const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
-        const halfW = Math.max((x1 - x0) / 2 + pad, width / minK / 2);
-        const halfH = Math.max((y1 - y0) / 2 + pad, height / minK / 2);
-        zoom.scaleExtent([minK, MAX_ZOOM])
-            .translateExtent([[cx - halfW, cy - halfH], [cx + halfW, cy + halfH]]);
+        const maxDx = s * ((x1 - x0) / 2 + PAN_PAD_FT);
+        const maxDy = s * ((y1 - y0) / 2 + PAN_PAD_FT);
+
+        const [vx, vy] = t.invert([width / 2, height / 2]);
+        const nx = Math.min(cx + maxDx, Math.max(cx - maxDx, vx));
+        const ny = Math.min(cy + maxDy, Math.max(cy - maxDy, vy));
+        if (nx === vx && ny === vy) return t;
+        return d3.zoomIdentity.translate(width / 2 - t.k * nx, height / 2 - t.k * ny).scale(t.k);
     }
 
     // Keep the same point of the city in the middle of the map
@@ -254,30 +273,21 @@ const LeafMap = (() => {
         ctx.lineWidth = 1 / k;
         ctx.strokeStyle = MAP_STYLE.boroughOutline;
         for (const b of boroughs) if (b.outline) ctx.stroke(b.outline);
-
-        if (selectedStreetPath) {
-            ctx.lineWidth = Math.max(1.5, streetPx * 1.5) / k;
-            ctx.strokeStyle = MAP_STYLE.selectedStreet;
-            ctx.stroke(selectedStreetPath);
-        }
     }
 
-    // Calls fn(borough, start, end, dimmed) for every tree range, dimmed ranges first
+    // Calls fn(borough, start, end, dimmed, scale) for every tree range, dimmed ranges first;
+    // selected streets are drawn over their (dimmed) borough
     function forEachRange(fn) {
-        if (selectedStreet >= 0) {
-            const [, boroIdx, start, count] = manifest.streets[selectedStreet];
-            boroughs.forEach((b, i) => {
-                if (i !== boroIdx) fn(b, 0, b.n, true);
-                else {
-                    fn(b, 0, start, true);
-                    fn(b, start + count, b.n, true);
-                }
-            });
-            fn(boroughs[boroIdx], start, start + count, false);
+        if (selectedStreets.size) {
+            for (const b of boroughs) fn(b, 0, b.n, true, 1);
+            for (const s of selectedStreets.values()) {
+                const h = eased(s);
+                fn(boroughs[s.boroIdx], s.start, s.start + s.count, h < 0.5, 1 + 0.5 * h);
+            }
             return;
         }
-        for (const b of boroughs) if (!boroughActive(b)) fn(b, 0, b.n, true);
-        for (const b of boroughs) if (boroughActive(b)) fn(b, 0, b.n, false);
+        for (const b of boroughs) if (!boroughActive(b)) fn(b, 0, b.n, true, 1);
+        for (const b of boroughs) if (boroughActive(b)) fn(b, 0, b.n, false, 1);
     }
 
     const dotDevicePx = leafPx => Math.max(1, Math.round(Math.max(1, leafPx * 0.6) * dpr));
@@ -294,18 +304,25 @@ const LeafMap = (() => {
             y: transform.y * dpr,
             size: Math.max(MAP_STYLE.minLeafPx, leafPx) * dpr,
             solid: 1 - t * t * (3 - 2 * t),
-            dimAlpha: MAP_STYLE.dimmedLeafAlpha,
-            ranges: highlightRanges()
+            dimAlpha: dimAlpha(),
+            ranges: highlightRanges(),
+            streetBoroughs: new Set(Array.from(selectedStreets.values(), s => s.boroIdx))
         });
     }
 
-    // Per borough, the [start, end) slice of trees drawn at full strength
+    // Per borough, the [start, end) slice of trees drawn at full strength;
+    // selected streets are highlighted through the renderer's per-tree highlight buffer instead
     function highlightRanges() {
-        if (selectedStreet >= 0) {
-            const [, boroIdx, start, count] = manifest.streets[selectedStreet];
-            return boroughs.map((b, i) => (i === boroIdx ? [start, start + count] : [0, 0]));
-        }
+        if (selectedStreets.size) return boroughs.map(() => [0, 0]);
         return boroughs.map(b => (boroughActive(b) ? [0, b.n] : [0, 0]));
+    }
+
+    // With no borough filter, the rest of the city fades in step with the selected streets
+    function dimAlpha() {
+        if (!selectedStreets.size || selectedBoroughs.size) return MAP_STYLE.dimmedLeafAlpha;
+        let h = 0;
+        for (const s of selectedStreets.values()) h = Math.max(h, eased(s));
+        return 1 - (1 - MAP_STYLE.dimmedLeafAlpha) * h;
     }
 
     // 2D fallback: every tree is a dot at every zoom
@@ -315,11 +332,11 @@ const LeafMap = (() => {
         const pixels = new Uint32Array(dotImage.data.buffer);
         pixels.fill(0);
 
-        const size = Math.min(dotDevicePx(leafPx), 6 * dpr);
-        const half = size >> 1;
         const k = transform.k * dpr, tx = transform.x * dpr, ty = transform.y * dpr;
 
-        forEachRange((b, start, end, dimmed) => {
+        forEachRange((b, start, end, dimmed, scale) => {
+            const size = Math.round(Math.min(dotDevicePx(leafPx), 6 * dpr) * scale);
+            const half = size >> 1;
             const palette = dimmed ? dotDim : dotFull;
             const { x, y, color } = b.trees;
             for (let i = start; i < end; i++) {
@@ -358,7 +375,7 @@ const LeafMap = (() => {
         if (selectedBoroughs.has(code)) selectedBoroughs.delete(code);
         else selectedBoroughs.add(code);
         updateToggles();
-        clearStreet(true);
+        clearStreets();
 
         const active = boroughs.filter(boroughActive);
         const bbox = [
@@ -368,35 +385,105 @@ const LeafMap = (() => {
         zoomTo(bbox);
     }
 
-    async function selectStreet(name) {
-        await api.ready;
-        const id = streetIndex.get(name);
-        if (id === undefined) return clearStreet();
-        if (id === selectedStreet) return;
+    const activeStreets = () => Array.from(selectedStreets.values()).filter(s => s.target === 1);
+    const selectedStreetNames = () => activeStreets().map(s => s.name);
 
-        const [, boroIdx, , , x0, y0, x1, y1] = manifest.streets[id];
-        selectedStreet = id;
-        selectedStreetPath = polylinesToPath(boroughs[boroIdx].lines, s => s === id);
-        zoomTo([x0, y0, x1, y1], STREET_MIN_SPAN_FT);
+    function notifyStreets() {
+        if (api.onStreetsChanged) api.onStreetsChanged(selectedStreetNames());
     }
 
-    function clearStreet(notify = false) {
-        if (selectedStreet < 0) return;
-        selectedStreet = -1;
-        selectedStreetPath = null;
+    function zoomToStreets() {
+        const active = activeStreets();
+        if (!active.length) return;
+        zoomTo([
+            d3.min(active, s => s.bbox[0]), d3.min(active, s => s.bbox[1]),
+            d3.max(active, s => s.bbox[2]), d3.max(active, s => s.bbox[3])
+        ], STREET_MIN_SPAN_FT);
+    }
+
+    async function addStreet(name) {
+        await api.ready;
+        const id = streetIndex.get(name);
+        if (id === undefined) return;
+
+        const existing = selectedStreets.get(id);
+        if (existing && existing.target === 1) return;
+        if (existing) {
+            existing.target = 1;
+        } else {
+            const [, boroIdx, start, count, x0, y0, x1, y1] = manifest.streets[id];
+            selectedStreets.set(id, {
+                name, boroIdx, start, count,
+                bbox: [x0, y0, x1, y1],
+                bytes: new Uint8Array(count),
+                progress: 0,
+                target: 1
+            });
+        }
+        startTween();
+        notifyStreets();
+        zoomToStreets();
+    }
+
+    function removeStreet(name) {
+        const s = selectedStreets.get(streetIndex.get(name));
+        if (!s || s.target === 0) return;
+        s.target = 0;
+        startTween();
+        notifyStreets();
+    }
+
+    function clearStreets() {
+        if (!activeStreets().length) return;
+        for (const s of selectedStreets.values()) s.target = 0;
+        startTween();
+        notifyStreets();
+    }
+
+    // ---------- highlight animation ----------
+
+    const eased = s => d3.easeCubicInOut(s.progress);
+
+    function startTween() {
+        if (tweenFrame !== null) return;
+        lastTweenTime = performance.now();
+        tweenFrame = requestAnimationFrame(tween);
+    }
+
+    function tween(now) {
+        tweenFrame = null;
+        // rAF timestamps can trail performance.now() on the first frame
+        const step = Math.max(0, now - lastTweenTime) / HIGHLIGHT_MS;
+        lastTweenTime = Math.max(lastTweenTime, now);
+
+        let moving = false;
+        for (const [id, s] of selectedStreets) {
+            if (s.progress === s.target) continue;
+            s.progress = s.target > s.progress
+                ? Math.min(s.target, s.progress + step)
+                : Math.max(s.target, s.progress - step);
+            if (renderer) {
+                s.bytes.fill(Math.round(eased(s) * 255));
+                renderer.setHighlight(s.boroIdx, s.start, s.bytes);
+            }
+            if (s.progress === 0 && s.target === 0) selectedStreets.delete(id);
+            else if (s.progress !== s.target) moving = true;
+        }
         scheduleDraw();
-        if (notify && api.onStreetCleared) api.onStreetCleared();
+        if (moving) tweenFrame = requestAnimationFrame(tween);
     }
 
     function resetView() {
         selectedBoroughs.clear();
         updateToggles();
-        clearStreet(true);
+        clearStreets();
         zoomTo(manifest.bbox);
     }
 
-    api.selectStreet = selectStreet;
-    api.clearStreet = () => clearStreet();
+    api.addStreet = addStreet;
+    api.removeStreet = removeStreet;
+    api.clearStreets = clearStreets;
+    api.selectedStreetNames = selectedStreetNames;
     api.resetView = resetView;
     return api;
 })();

@@ -8,6 +8,7 @@ layout(location = 2) in float a_y;       // feet south of the map origin
 layout(location = 3) in float a_shape;
 layout(location = 4) in float a_color;
 layout(location = 5) in float a_rotation; // 0..255 -> full turn
+layout(location = 6) in float a_highlight; // 0..1 street highlight progress
 
 uniform vec2 u_viewport;     // device px
 uniform vec3 u_transform;    // k, x, y in device px
@@ -27,14 +28,16 @@ flat out float v_gain;
 flat out float v_alpha;
 
 void main() {
-    bool highlighted = gl_InstanceID >= u_rangeStart && gl_InstanceID < u_rangeEnd;
+    bool inRange = gl_InstanceID >= u_rangeStart && gl_InstanceID < u_rangeEnd;
+    float h = a_highlight;
+    bool highlighted = inRange || h > 0.0;
     if (highlighted != (u_pass == 1)) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);  // outside the clip volume
         return;
     }
 
     float a = a_rotation * (6.2831853 / 256.0);
-    vec2 corner = mat2(cos(a), sin(a), -sin(a), cos(a)) * (a_corner * u_size);
+    vec2 corner = mat2(cos(a), sin(a), -sin(a), cos(a)) * (a_corner * u_size * (1.0 + 0.5 * h));
     vec2 screen = vec2(a_x, a_y) * u_transform.x + u_transform.yz + corner;
     gl_Position = vec4(screen / u_viewport * 2.0 - 1.0, 0.0, 1.0);
     gl_Position.y = -gl_Position.y;
@@ -45,7 +48,7 @@ void main() {
     // dividing by its mean coverage keeps the zoomed-out city as saturated as solid dots.
     float coverage = textureLod(u_leaves, vec3(0.5, 0.5, v_layer), u_maxLevel).a;
     v_gain = mix(1.0, 1.0 / max(coverage, 0.05), u_solid);
-    v_alpha = highlighted ? 1.0 : u_dimAlpha;
+    v_alpha = inRange ? 1.0 : mix(u_dimAlpha, 1.0, h);
 }
 `;
 
@@ -67,6 +70,27 @@ void main() {
     vec4 color = leaf * v_alpha;
     if (color.a < 0.004) discard;
     outColor = color;
+}
+`;
+
+// Fullscreen triangle that draws an offscreen layer (premultiplied) at an opacity
+const COMPOSITE_VERTEX_SHADER = `#version 300 es
+out vec2 v_uv;
+void main() {
+    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+    v_uv = p;
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+`;
+
+const COMPOSITE_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+uniform sampler2D u_layer;
+uniform float u_opacity;
+in vec2 v_uv;
+out vec4 outColor;
+void main() {
+    outColor = texture(u_layer, v_uv) * u_opacity;
 }
 `;
 
@@ -159,9 +183,23 @@ function createLeafRenderer(canvas, options) {
         instanceAttrib(3, b.trees.shape, gl.UNSIGNED_BYTE);
         instanceAttrib(4, b.trees.color, gl.UNSIGNED_BYTE);
         instanceAttrib(5, rotation, gl.UNSIGNED_BYTE);
+
+        const highlight = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, highlight);
+        gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array(b.n), gl.DYNAMIC_DRAW);
+        gl.enableVertexAttribArray(6);
+        gl.vertexAttribPointer(6, 1, gl.UNSIGNED_BYTE, true, 0, 0);
+        gl.vertexAttribDivisor(6, 1);
+
         gl.bindVertexArray(null);
-        return { vao, n: b.n };
+        return { vao, n: b.n, highlight };
     });
+
+    // Writes highlight bytes (0..255) for trees [start, start + bytes.length) of one borough
+    function setHighlight(boroIdx, start, bytes) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, layers[boroIdx].highlight);
+        gl.bufferSubData(gl.ARRAY_BUFFER, start, bytes);
+    }
 
     // ---- constant state ----
     gl.useProgram(program);
@@ -172,15 +210,54 @@ function createLeafRenderer(canvas, options) {
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.clearColor(0, 0, 0, 0);
 
+    // ---- dimmed layer: drawn at full strength offscreen, then faded as a whole ----
+    // Fading each leaf instead would let hundreds of overlapping tiny leaves add back up
+    // to nearly opaque when zoomed out.
+    const compositeProgram = linkProgram(gl, COMPOSITE_VERTEX_SHADER, COMPOSITE_FRAGMENT_SHADER);
+    const uComposite = {
+        layer: gl.getUniformLocation(compositeProgram, 'u_layer'),
+        opacity: gl.getUniformLocation(compositeProgram, 'u_opacity')
+    };
+    const compositeVao = gl.createVertexArray();
+    const dimTexture = gl.createTexture();
+    const dimFramebuffer = gl.createFramebuffer();
+
     function resize() {
         gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.bindTexture(gl.TEXTURE_2D, dimTexture);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, canvas.width, canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, dimFramebuffer);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, dimTexture, 0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+    resize();
+
+    function drawPass(state, pass) {
+        gl.uniform1i(u.pass, pass);
+        layers.forEach((layer, i) => {
+            const [start, end] = state.ranges[i];
+            const highlightedCount = end - start;
+            if (pass === 0 && highlightedCount === layer.n) return;
+            if (pass === 1 && highlightedCount === 0 && !state.streetBoroughs.has(i)) return;
+            gl.uniform1i(u.rangeStart, start);
+            gl.uniform1i(u.rangeEnd, end);
+            gl.bindVertexArray(layer.vao);
+            gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, layer.n);
+        });
+        gl.bindVertexArray(null);
     }
 
     // state: { k, x, y (device px), size (device px), solid (0..1), dimAlpha,
-    //          ranges: [[start, end], ...] highlighted instances per borough }
+    //          ranges: [[start, end], ...] highlighted instances per borough,
+    //          streetBoroughs: Set of borough indices with highlighted streets }
     function draw(state) {
+        const anyDimmed = layers.some((layer, i) => state.ranges[i][1] - state.ranges[i][0] < layer.n);
+
         gl.viewport(0, 0, canvas.width, canvas.height);
-        gl.clear(gl.COLOR_BUFFER_BIT);
         gl.useProgram(program);
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture);
@@ -188,26 +265,34 @@ function createLeafRenderer(canvas, options) {
         gl.uniform3f(u.transform, state.k, state.x, state.y);
         gl.uniform1f(u.size, state.size);
         gl.uniform1f(u.solid, state.solid);
-        gl.uniform1f(u.dimAlpha, state.dimAlpha);
 
-        // dimmed trees first, so highlighted leaves sit on top
-        for (const pass of [0, 1]) {
-            gl.uniform1i(u.pass, pass);
-            layers.forEach((layer, i) => {
-                const [start, end] = state.ranges[i];
-                const highlightedCount = end - start;
-                if (pass === 0 && highlightedCount === layer.n) return;
-                if (pass === 1 && highlightedCount === 0) return;
-                gl.uniform1i(u.rangeStart, start);
-                gl.uniform1i(u.rangeEnd, end);
-                gl.bindVertexArray(layer.vao);
-                gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, layer.n);
-            });
+        if (anyDimmed) {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, dimFramebuffer);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.uniform1f(u.dimAlpha, 1);
+            drawPass(state, 0);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         }
-        gl.bindVertexArray(null);
+
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        if (anyDimmed) {
+            gl.useProgram(compositeProgram);
+            gl.bindTexture(gl.TEXTURE_2D, dimTexture);
+            gl.uniform1i(uComposite.layer, 0);
+            gl.uniform1f(uComposite.opacity, state.dimAlpha);
+            gl.bindVertexArray(compositeVao);
+            gl.drawArrays(gl.TRIANGLES, 0, 3);
+            gl.bindVertexArray(null);
+            gl.useProgram(program);
+            gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture);
+        }
+
+        // highlighted trees on top of the faded layer
+        gl.uniform1f(u.dimAlpha, state.dimAlpha);
+        drawPass(state, 1);
     }
 
-    return { resize, draw, gl };
+    return { resize, draw, setHighlight, gl };
 }
 
 function linkProgram(gl, vertexSource, fragmentSource) {

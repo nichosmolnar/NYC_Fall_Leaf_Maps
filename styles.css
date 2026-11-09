@@ -18,15 +18,41 @@ h2 {
     margin: 0 0 18px;
 }
 
-.map-panel {
+.map-sidebar {
     position: absolute;
     top: 24px;
     left: 24px;
-    width: 320px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: fit-content;
     max-width: calc(100% - 48px);
+}
+
+.map-panel {
+    box-sizing: border-box;
     padding: 16px;
     background: rgba(247, 247, 245, 0.85);
     border-radius: 8px;
+}
+
+/* only the h1 sizes the sidebar; everything else wraps to its width */
+.map-panel h2,
+.input-container,
+.map-controls,
+#selected-streets {
+    contain: inline-size;
+}
+
+#selected-streets {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+}
+
+#selected-streets[hidden] {
+    display: none;
 }
 
 .input-container {
@@ -64,7 +90,8 @@ label {
     display: contents;
 }
 
-.map-controls button {
+.map-controls button,
+.street-chip {
     padding: 5px 12px;
     font-size: 13px;
     color: #555;
@@ -78,10 +105,16 @@ label {
     border-color: #9a9a94;
 }
 
-.map-controls button.active {
+.map-controls button.active,
+.street-chip {
     color: #fff;
     background: #555;
     border-color: #555;
+}
+
+.street-chip:hover {
+    background: #333;
+    border-color: #333;
 }
 
 #map {

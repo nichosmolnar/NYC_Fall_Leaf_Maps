@@ -37,59 +37,63 @@ function populateStreetList() {
 function setupEventListeners() {
     const input = document.getElementById('street-input');
     
-    input.addEventListener('change', function() {
-        const streetName = this.value;
-        if (streetData[streetName]) {
-            displayLeaves(streetName);
-            LeafMap.selectStreet(streetName);
-        } else {
-            clearDisplay();
-            LeafMap.clearStreet();
-        }
-    });
-    
-    input.addEventListener('input', function() {
-        const streetName = this.value;
-        if (streetData[streetName]) {
-            displayLeaves(streetName);
-            LeafMap.selectStreet(streetName);
-        }
+    const addInputStreet = () => {
+        if (!streetData[input.value]) return;
+        LeafMap.addStreet(input.value);
+        input.value = '';
+    };
+
+    input.addEventListener('change', addInputStreet);
+
+    // Only datalist picks add on input; typing "Main St" on the way to "Main Street" shouldn't
+    input.addEventListener('input', function(event) {
+        if (!event.inputType || event.inputType === 'insertReplacementText') addInputStreet();
     });
 
-    // Borough toggles and "Reset view" on the map clear the selected street
-    LeafMap.onStreetCleared = () => {
-        input.value = '';
-        clearDisplay();
+    LeafMap.onStreetsChanged = names => {
+        renderChips(names);
+        displayLeaves(names);
     };
 }
 
-// Clear the leaf display
-function clearDisplay() {
-    const display = document.getElementById('leaf-display');
-    display.innerHTML = '';
+// Selected streets as removable chips under the panel
+function renderChips(names) {
+    const box = d3.select('#selected-streets');
+    box.property('hidden', names.length === 0);
+    box.selectAll('button')
+        .data(names, d => d)
+        .join('button')
+        .attr('type', 'button')
+        .attr('class', 'street-chip')
+        .attr('aria-label', name => `Remove ${name}`)
+        .text(name => `${name} \u00d7`)
+        .on('click', (event, name) => LeafMap.removeStreet(name));
 }
 
-// Display leaves for a selected street
-function displayLeaves(streetName) {
+// Display leaves for all selected streets
+function displayLeaves(names) {
     const display = document.getElementById('leaf-display');
     display.innerHTML = '';
     
-    const streetInfo = streetData[streetName];
-    
-    // Iterate through each shape for this street
-    for (const shapeName in streetInfo) {
-        const colorArray = streetInfo[shapeName];
-        
-        // Iterate through each color object in the array
-        colorArray.forEach(colorObj => {
-            // Each colorObj has one key (color name) and value (count)
-            for (const colorName in colorObj) {
-                const count = colorObj[colorName];
-                
-                // Create a leaf for this shape-color combination
-                createLeaf(shapeName, colorName, count);
-            }
-        });
+    for (const streetName of names) {
+        const streetInfo = streetData[streetName];
+        if (!streetInfo) continue;
+
+        // Iterate through each shape for this street
+        for (const shapeName in streetInfo) {
+            const colorArray = streetInfo[shapeName];
+            
+            // Iterate through each color object in the array
+            colorArray.forEach(colorObj => {
+                // Each colorObj has one key (color name) and value (count)
+                for (const colorName in colorObj) {
+                    const count = colorObj[colorName];
+                    
+                    // Create a leaf for this shape-color combination
+                    createLeaf(shapeName, colorName, count);
+                }
+            });
+        }
     }
 }
 
