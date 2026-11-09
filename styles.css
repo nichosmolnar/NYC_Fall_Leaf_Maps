@@ -1,37 +1,49 @@
 body {
     font-family: Arial, sans-serif;
-    padding: 20px;
-    background-color: #f5f5f5;
+    margin: 0;
+    background-color: #f7f7f5;
 }
 
 h1 {
     color: #333;
-    text-align: center;
+    font-size: 1.6rem;
+    margin: 0 0 8px;
 }
 
 h2 {
     color: #777;
-    text-align: center;
-    font-size: 1rem;
+    font-size: 0.95rem;
+    font-weight: normal;
+    line-height: 1.4;
+    margin: 0 0 18px;
+}
+
+.map-panel {
+    position: absolute;
+    top: 24px;
+    left: 24px;
+    width: 320px;
+    max-width: calc(100% - 48px);
+    padding: 16px;
+    background: rgba(247, 247, 245, 0.85);
+    border-radius: 8px;
 }
 
 .input-container {
-    max-width: 600px;
-    margin: 20px auto;
-    text-align: center;
+    margin-bottom: 12px;
 }
 
 label {
     display: block;
-    margin-bottom: 10px;
-    font-size: 18px;
+    margin-bottom: 8px;
+    font-size: 15px;
     color: #555;
 }
 
 #street-input {
     width: 100%;
-    padding: 10px;
-    font-size: 16px;
+    padding: 8px 10px;
+    font-size: 15px;
     border: 2px solid #ddd;
     border-radius: 5px;
     box-sizing: border-box;
@@ -42,11 +54,80 @@ label {
     border-color: #567112;
 }
 
+.map-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+#borough-toggles {
+    display: contents;
+}
+
+.map-controls button {
+    padding: 5px 12px;
+    font-size: 13px;
+    color: #555;
+    background: transparent;
+    border: 1px solid #d6d6d2;
+    border-radius: 999px;
+    cursor: pointer;
+}
+
+.map-controls button:hover {
+    border-color: #9a9a94;
+}
+
+.map-controls button.active {
+    color: #fff;
+    background: #555;
+    border-color: #555;
+}
+
+#map {
+    position: relative;
+    width: 100%;
+    height: 100vh;
+    min-height: 520px;
+}
+
+#map canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+}
+
+#street-canvas {
+    pointer-events: none;
+}
+
+#leaf-canvas {
+    cursor: grab;
+}
+
+#leaf-canvas:active {
+    cursor: grabbing;
+}
+
+#map-status {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #999;
+    pointer-events: none;
+}
+
+#map-status[hidden] {
+    display: none;
+}
+
 #leaf-display {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
     gap: 15px;
-    margin-top: 30px;
     padding: 20px;
     justify-items: center;
     align-items: center;

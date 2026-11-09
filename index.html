@@ -8,18 +8,33 @@
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <h1>Autumn Leaves of New York:</h1>
-    <h2>If you were walking down a street in 2015 New York, <br> what shapes and colors would you see on the ground?</h2>
+    <div id="map">
+        <canvas id="street-canvas"></canvas>
+        <canvas id="leaf-canvas"></canvas>
+        <div id="map-status">Gathering leaves&hellip;</div>
 
-    
-    <div class="input-container">
-        <label for="street-input">Select a Street:</label>
-        <input type="text" id="street-input" list="street-list" placeholder="Type or select a street...">
-        <datalist id="street-list"></datalist>
+        <div class="map-panel">
+            <h1>Autumn Leaves of New York:</h1>
+            <h2>If you were walking down a street in 2015 New York, what shapes and colors would you see on the ground?</h2>
+
+            <div class="input-container">
+                <label for="street-input">Select a Street:</label>
+                <input type="text" id="street-input" list="street-list" placeholder="Type or select a street...">
+                <datalist id="street-list"></datalist>
+            </div>
+
+            <div class="map-controls">
+                <div id="borough-toggles"></div>
+                <button id="reset-view" type="button">Reset view</button>
+            </div>
+        </div>
     </div>
     
     <div id="leaf-display"></div>
     
+    <script src="colors.js"></script>
+    <script src="leaf-gl.js"></script>
+    <script src="map.js"></script>
     <script src="main.js"></script>
 </body>
 </html>
